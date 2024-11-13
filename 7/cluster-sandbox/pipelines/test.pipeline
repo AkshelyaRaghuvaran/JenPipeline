@@ -3,7 +3,7 @@ pipeline {
                 parameterizedCron("""TZ=America/Detroit
                 """)
         }	
-        agent {
+ //       agent {
 // 		kubernetes {
 // 			inheritFrom 'default'
 // 			yaml '''
@@ -23,7 +23,7 @@ pipeline {
 //                         retries 2
 // 		}
     // echo "agent calling"
-	}
+	//}
     options {
         disableConcurrentBuilds()
                 timeout(time: 2, unit: 'HOURS')
