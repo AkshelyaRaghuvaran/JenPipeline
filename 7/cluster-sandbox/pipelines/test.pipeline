@@ -4,24 +4,25 @@ pipeline {
                 """)
         }	
         agent {
-		kubernetes {
-			inheritFrom 'default'
-			yaml '''
-spec:
-  priorityClassName: priorityclassdefault
-  imagePullSecrets:
-  - name: harbor-pull-cred
-  containers:
-  - name: ubuntu
-    image: ubuntu:latest
-    tty: true
-    command: ["/bin/sh"]
-    args: ["-c", "sleep 2h"]
-    securityContext:
-      privileged: true
-                        '''
-                        retries 2
-		}
+// 		kubernetes {
+// 			inheritFrom 'default'
+// 			yaml '''
+// spec:
+//   priorityClassName: priorityclassdefault
+//   imagePullSecrets:
+//   - name: harbor-pull-cred
+//   containers:
+//   - name: ubuntu
+//     image: ubuntu:latest
+//     tty: true
+//     command: ["/bin/sh"]
+//     args: ["-c", "sleep 2h"]
+//     securityContext:
+//       privileged: true
+//                         '''
+//                         retries 2
+// 		}
+    echo "agent calling"
 	}
     options {
         disableConcurrentBuilds()
