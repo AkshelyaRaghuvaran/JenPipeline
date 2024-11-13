@@ -1,0 +1,124 @@
+//##########################################
+//Init variables to empty values for first run
+if (! env.ALERT_ON_FAIL) {
+	ALERT_ON_FAIL='false'
+}
+if (! env.DRYRUN) {
+	DRYRUN='true'
+}
+//##########################################
+
+
+
+pipeline {
+        triggers {
+                parameterizedCron("""TZ=America/Detroit
+                """)
+        }	
+        agent {
+		kubernetes {
+			inheritFrom 'default'
+			yaml '''
+spec:
+  priorityClassName: priorityclassdefault
+  imagePullSecrets:
+  - name: harbor-pull-cred
+  containers:
+  - name: ubuntu
+    image: ubuntu:latest
+    tty: true
+    command: ["/bin/sh"]
+    args: ["-c", "sleep 2h"]
+    securityContext:
+      privileged: true
+                        '''
+                        retries 2
+		}
+	}
+	options {
+		disableConcurrentBuilds()
+                timeout(time: 2, unit: 'HOURS')
+                timestamps()
+	}
+	stages {
+		stage("Ask for parameters") {
+			steps {
+				script {
+                                        def now=new Date()
+					properties([
+						parameters ([
+                                                        booleanParam(
+                                                                name: 'ALERT_ON_FAIL',
+                                                                defaultValue: false,
+                                                                description: 'Send email if job fails?'
+                                                        ),
+                                                        booleanParam(
+                                                                name: 'DRYRUN',
+                                                                defaultValue: false,
+                                                                description: 'Used for job reconfiguration'
+                                                        )
+						])
+					])
+				}
+			}
+		}
+		stage("Job stage") {
+			when { 
+				allOf {
+					expression { DRYRUN != 'true' }
+				}
+			}
+			steps {
+				container('ubuntu') {
+					catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+						timeout(time: 15, unit: 'MINUTES', activity: true) {
+							sh("""
+								apt-get update
+                                apt-get install npm nodejs openjdk-21-jdk-headless -y
+
+                                # Install Playwright Dependencies
+								 npm install
+								 npm install @cucumber/cucumber
+								 npx playwright install
+								 npx playwright install-deps
+								 rm -rf node_modules/multiple-cucumber-html-reporter/examples/cypress
+
+								# Run the Test 
+                                 npx cucumber-js project_Web/features/Import.feature
+                                # npx cucumber-js project_Web/features --tags "@E2E"
+								# npm run test
+								# npx cucumber-js project_Web/features --tags "@${params.TAG_NAME}" --exit --format json:reports/cucumberReport/web_report.json
+                                # npx cucumber-js project_Web/features --tags "@${params.COMPONENT_NAME}" --exit --format json:reports/cucumberReport/web_report.json
+								# npx cucumber-js project_Web/features/${params.COMPONENT_NAME}.feature --tags "@${params.TAG_NAME}"
+
+								# Generate report
+								 npm run generate-report
+								 node support/multipleReporter.js
+								 cd /home/jenkins/agent/workspace/autotesting/${JOB_BASE_NAME}/reports
+								 rm -f Report*.zip
+								 tar -cf Report_${JOB_BASE_NAME}_${BUILD_NUMBER}_${params.TAG_NAME}.tgz cucumberReport/*
+							""")
+						}
+					}
+				}
+			}
+		}
+	}
+        post {
+                failure {
+                        println "Finished - FAILED!"
+			script {
+				if (ALERT_ON_FAIL == 'true') {
+                        emailext (
+                            attachLog: true,
+                            subject: "[${currentBuild.result}] ${JOB_BASE_NAME} - Build #${BUILD_NUMBER}",
+                            body: """Status: ${currentBuild.result}.  See ${BUILD_URL} for more info.""",
+                            to: 'smaruthaiy@la-z-boy.com',
+                            attachmentsPattern: '**/Report*.tgz',  // If you need to attach files
+                            mimeType: 'text/html'
+                         )
+                    }
+			}
+                }
+        }
+}

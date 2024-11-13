@@ -1,0 +1,7 @@
+{
+  "default": {
+    "require": ["support/hooks.js", "**/*step.js"],
+    "paths": ["/*.feature"],
+    "format": ["@cucumber/pretty-formatter"]
+  }
+}

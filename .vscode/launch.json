@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "command": "npx cucumber-js project_Web/features/SupportRequest.feature",
+        "name": "Run SupportRequest.feature",
+        "request": "launch",
+        "type": "node-terminal"
+      },
+      {
+        "command": "npx cucumber-js project_Web/features/ProductRegistration.feature",
+        "name": "Run ProductRegistration.feature",
+        "request": "launch",
+        "type": "node-terminal"
+      },
+      {
+        "command": "npx cucumber-js project_Web/features/Import.feature",
+        "name": "Run Import.feature",
+        "request": "launch",
+        "type": "node-terminal"
+      },
+      {
+        "type": "node",
+        "request": "launch",
+        "name": "Launch Program",
+        "skipFiles": ["<node_internals>/**"],
+        "program": "${workspaceFolder}/path/to/your/script.js"
+      }
+    ]
+  }

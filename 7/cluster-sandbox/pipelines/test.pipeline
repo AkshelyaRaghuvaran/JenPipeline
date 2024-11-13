@@ -1,0 +1,595 @@
+pipeline {
+    triggers {
+                parameterizedCron("""TZ=America/Detroit
+                """)
+        }	
+        agent {
+		kubernetes {
+			inheritFrom 'default'
+			yaml '''
+spec:
+  priorityClassName: priorityclassdefault
+  imagePullSecrets:
+  - name: harbor-pull-cred
+  containers:
+  - name: ubuntu
+    image: ubuntu:latest
+    tty: true
+    command: ["/bin/sh"]
+    args: ["-c", "sleep 2h"]
+    securityContext:
+      privileged: true
+                        '''
+                        retries 2
+		}
+	}
+    options {
+        disableConcurrentBuilds()
+                timeout(time: 2, unit: 'HOURS')
+                timestamps()
+    }
+
+    environment{
+
+    lastCommitUser = "NOT APPLICABLE"
+    lastCommitTime = "NOT APPLICABLE"
+    lastCommitMessage = "No changes detected since the last successful build."
+    lastCommitID = "No changes detected since the last successful build."
+                                           
+    }
+
+    parameters {
+        // Define a choice parameter for selecting the environment
+        choice(
+            name: 'COMPONENT_NAME',
+            choices: ['Import','ProductRegistration', 'SupportRequest'],
+            description: 'Select the component for test execution'		
+        )
+    }
+	
+	stages {
+
+            stage("Print Initial Values") {
+                steps {
+                    script {
+                        echo "Jenkins Environment Variables:"
+                        echo "JOB_BASE_NAME: ${env.JOB_BASE_NAME}"
+                        echo "BUILD_NUMBER: ${env.BUILD_NUMBER}"
+                        echo "BUILD_URL: ${env.BUILD_URL}"
+                        echo "COMPONENT_NAME: ${params.COMPONENT_NAME}"
+                    }
+                }
+            }
+
+            stage("Install Dependencies") {
+                steps {
+                    container('ubuntu') {
+                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                            timeout(time: 15, unit: 'MINUTES', activity: true) {
+                                sh("""
+                                    apt-get update 
+                                    apt-get install npm nodejs openjdk-21-jdk-headless -y 
+
+                                    # Install Playwright Dependencies
+                                    npm install
+                                    npm install @cucumber/cucumber
+                                    npx playwright install
+                                    npx playwright install-deps
+                                    rm -rf node_modules/multiple-cucumber-html-reporter/examples/cypress
+                                """)
+                            }
+                        }
+                    }
+                }
+            }
+
+            stage("Execute Test Run") {
+                steps {
+                    container('ubuntu') {
+                        catchError(buildResult: 'SUCCESS') {
+                            timeout(time: 15, unit: 'MINUTES', activity: true) {
+                                sh("""
+                                    npx cucumber-js project_Web/features/${params.COMPONENT_NAME}.feature --exit --format json:reports/cucumberReport/web_report.json
+                                """)
+                            }
+                        }
+                    }
+                }
+            }
+
+            stage("Generate Report") {
+                steps {
+                    container('ubuntu') {
+                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                            timeout(time: 15, unit: 'MINUTES', activity: true) {
+                                script{
+                                    sh("""
+                                        # Generate report
+                                        npm run generate-report
+                                        node support/multipleReporter.js
+                                        cd /home/jenkins/agent/workspace/autotesting/${JOB_BASE_NAME}/reports
+                                        rm -f Report*.zip
+                                        # ls -lR
+                                        tar -cf Report_${JOB_BASE_NAME}-${params.COMPONENT_NAME}#${BUILD_NUMBER}.tgz cucumberReport/*
+                                        ls -l
+                                    """)
+                                    jsonParser()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+    }
+
+     post {
+            always {
+                    println "Finished - ${currentBuild.result}!"
+                    script {
+                         echo "Pipeline Finished with Result: ${currentBuild.result}"
+                         emailext (
+                            attachLog: true,
+                            subject: "[${currentBuild.result}] ${JOB_BASE_NAME}-${params.COMPONENT_NAME}-Build #${BUILD_NUMBER}",
+                            body: """
+                                <html>
+                                <head>
+                                    <style>
+                                        body {
+                                            font-family: Arial, sans-serif;color: #333;background-color: #f4f4f9;margin: 0;padding: 20px;   }
+                                        .container {
+                                            max-width: 600px; margin: auto; background-color: #ffffff; padding: 20px; border-radius: 5px;  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);  }
+                                        h2 {
+                                            color: #0073e6;   }
+                                        h3 {
+                                            color: #333;   }
+                                        p {
+                                            line-height: 1.6;    }
+                                        ul {
+                                            padding: 0;    list-style-type: none;    }
+                                        li {
+                                            margin-bottom: 5px;   }
+                                        .footer {    margin-top: 20px;    font-size: 12px;   color: #666;    border-top: 1px solid #ccc;    padding-top: 10px;   }
+                                        .button {    display: inline-block;    padding: 10px 20px;    color: #ffffff;    background-color: #0073e6;   text-decoration: none;   border-radius: 3px;   margin-top: 10px;    }
+                                    </style>
+                                </head>
+                                <body>
+                                    <div class="container">
+                                        <h2>Build Report for ${JOB_BASE_NAME}-${params.COMPONENT_NAME}-Build#${BUILD_NUMBER}</h2>
+                                        
+                                        <p><strong>Build URL:</strong> <a href="${BUILD_URL}">${BUILD_URL}</a></p>
+                    
+                                            <li><strong>Status:</strong> ${currentBuild.result}</li>
+                                            <li><strong>Build Number:</strong> ${BUILD_NUMBER}</li>
+                                            <li><strong>Component Name:</strong> ${params.COMPONENT_NAME}</li>
+                                            <li><strong>Duration:</strong> ${env.durationInMinutes} minutes</li>
+                                            <li><strong>Triggered By:</strong> ${env.triggeredByUser}</li>
+                                        </ul>                          
+
+                                    <h3>Latest Code Change Summary</h3>
+                                        <ul>		
+                                            <li><strong>Commit ID:</strong> ${env.lastCommitID}</li>
+                                            <li><strong>Commit Message:</strong> ${env.lastCommitMessage}</li>
+                                            <li><strong>Commit User:</strong> ${env.lastCommitUser}</li>
+                                            <li><strong>Commit Date & Time:</strong> ${env.lastCommitTime}</li>
+                                        </ul>
+                                      <h3>Report Summary</h3>
+                                        <ul>		
+                                            <li><strong>Passed Count </strong> ${passedCount}</li>
+                                            <li><strong>Failed Count </strong> ${failedCount}</li>
+                                            <li><strong>Skipped Count </strong> ${skippedCount}</li>
+                                        </ul>
+
+                                        <h3>Console Output</h3>
+                                        <p>For detailed logs, please check the <a href="${BUILD_URL}console">console output</a>.</p>
+
+                                        <a href="${BUILD_URL}console" class="button">View Console Output</a>
+
+                                        <div class="footer">
+                                            <p>Sent by Jenkins on <a href="${BUILD_URL}">${BUILD_URL}</a></p>
+                                        </div>
+                                    </div>
+                                </body>
+                                </html>
+                            """,
+                            to: 'smaruthaiy@la-z-boy.com',
+                            attachmentsPattern: '**/Report*.tgz',  // If you need to attach files
+                            mimeType: 'text/html'
+                        )
+                    }
+            }
+
+        }
+}
+
+def jsonParser() {
+  
+    triggeredByUser = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')[0]?.userId ?: 'System'      
+    durationInMinutes = currentBuild.duration ? (currentBuild.duration / 1000 / 60) as Integer : 0
+    // Initialize counters to avoid null errors
+        int passedCount = 0
+        int failedCount = 0
+        int skippedCount = 0
+    echo "DurationInMinutes: ${durationInMinutes}"
+    echo "Triggered by: ${triggeredByUser}"
+
+    if (currentBuild.changeSets) {
+        currentBuild.changeSets.each { changeLogSet ->
+            changeLogSet.each { entry ->
+                lastCommitID = entry.commitId ?: "Unknown"
+                lastCommitMessage = entry.msg ?: "No message"
+                lastCommitUser = entry.author?.fullName ?: "Unknown"
+                
+                def commitDateTime = new Date(entry.timestamp)
+                def dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+                lastCommitTime = dateFormat.format(commitDateTime)
+                echo "Commit ID: ${env.lastCommitID}, Message: ${env.lastCommitMessage}, User: ${env.lastCommitUser}"
+            }
+        }
+    }
+
+    def webReportJson = readFile("/home/jenkins/agent/workspace/autotesting/${JOB_BASE_NAME}/reports/cucumberReport/web_report.json")
+        // Parse the JSON content using JsonSlurper
+        def jsonSlurper = new groovy.json.JsonSlurper()
+        def webReport = jsonSlurper.parseText(webReportJson)
+
+        echo "Iterate over each feature in the serializable JSON structure"
+        // Iterate over each feature in the JSON structure
+        webReport.each { feature ->
+            def featureName = feature?.name ?: "Unknown Feature"
+            echo "Feature: ${featureName}"
+
+            feature?.elements?.each { scenario ->
+                def scenarioName = scenario?.name ?: "Unknown Scenario"
+                echo "Scenario: ${scenarioName}"
+
+                scenario?.steps?.each { step ->
+                    def stepName = step?.name ?: "Unknown Step"
+                    def stepStatus = step?.result?.status?.toUpperCase() ?: "UNKNOWN"
+                    def errorMessage = step?.result?.error_message ?: "No error message provided" // Attempt to get the error message
+                    
+                    // Check if the step name contains "Before" or "After" and skip those steps
+                    if (!stepName.contains("Before") && !stepName.contains("After") && !stepName.contains("Unknown")) {
+                        echo "Step: ${stepName} - Status: ${stepStatus}"
+                        
+                        if (stepStatus == 'PASSED') {
+                            passedCount++
+                        } else if (stepStatus == 'FAILED') {
+                            failedCount++
+                            echo "Error: Step '${stepName}' failed in scenario '${scenarioName}' in feature '${featureName}'"
+                            echo "Failure Details: ${errorMessage}" // Print the specific error message
+                        } else if (stepStatus == 'SKIPPED') {
+                            skippedCount++
+                        }
+                    } else {
+                        echo "Ignoring Step: ${stepName} as it is a Before/After step"
+                    }
+                }
+            }
+        }
+
+    echo "Total Passed: ${passedCount}"    
+    echo "Total Failed: ${failedCount}"
+    echo "Total Skipped: ${skippedCount}"
+
+}
+
+
+
+
+  // <p>Test execution summary:</p>
+                        // <ul>
+                        //     <li>Total Passed: ${passedCount}</li>
+                        //     <li>Total Failed: ${failedCount}</li>
+                        //     <li>Total Skipped: ${skippedCount}</li>
+                        // </ul>
+                        //  <h3>Report Summary</h3>
+                        // <ul>		
+                        //     <li><strong>Passed Count </strong> ${passedCount}</li>
+                        //     <li><strong>Failed Count </strong> ${failedCount}</li>
+                        //     <li><strong>Skipped Count </strong> ${skippedCount}</li>
+                        // </ul>
+
+
+// pipeline {
+//     triggers {
+//         parameterizedCron("""TZ=America/Detroit
+//         """)
+//     }	
+//     agent {
+//         kubernetes {
+//             inheritFrom 'default'
+//             yaml '''
+// spec:
+//   priorityClassName: priorityclassdefault
+//   imagePullSecrets:
+//   - name: harbor-pull-cred
+//   containers:
+//   - name: ubuntu
+//     image: ubuntu:latest
+//     tty: true
+//     command: ["/bin/sh"]
+//     args: ["-c", "sleep 2h"]
+//     securityContext:
+//       privileged: true
+//             '''
+//             retries 2
+//         }
+//     }
+//     options {
+//         disableConcurrentBuilds()
+//         timeout(time: 2, unit: 'HOURS')
+//         timestamps()
+//     }
+
+//     parameters {
+//         choice(
+//             name: 'COMPONENT_NAME',
+//             choices: ['Import','ProductRegistration', 'SupportRequest'],
+//             description: 'Select the component for test execution'		
+//         )
+//     }
+	
+//             stages {
+
+//                         stage("Print Initial Values") {
+//                             steps {
+//                                 script {
+//                                     echo "Jenkins Environment Variables:"
+//                                     echo "JOB_BASE_NAME: ${env.JOB_BASE_NAME}"
+//                                     echo "BUILD_NUMBER: ${env.BUILD_NUMBER}"
+//                                     echo "BUILD_URL: ${env.BUILD_URL}"
+//                                     echo "COMPONENT_NAME: ${params.COMPONENT_NAME}"
+//                                 }
+//                             }
+//                         }
+
+//                         stage("Install Dependencies") {
+//                             steps {
+//                                 container('ubuntu') {
+//                                     catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+//                                         timeout(time: 15, unit: 'MINUTES', activity: true) {
+//                                             sh("""
+//                                                 apt-get update 
+//                                                 apt-get install npm nodejs openjdk-21-jdk-headless -y 
+
+//                                                 # Install Playwright Dependencies
+//                                                 npm install
+//                                                 npm install @cucumber/cucumber
+//                                                 npx playwright install
+//                                                 npx playwright install-deps
+//                                                 rm -rf node_modules/multiple-cucumber-html-reporter/examples/cypress
+//                                             """)
+//                                         }
+//                                     }
+//                                 }
+//                             }
+//                         }
+
+//                         stage("Execute Test Run") {
+//                             steps {
+//                                 container('ubuntu') {
+//                                     catchError(buildResult: 'UNSTABLE') {
+//                                         timeout(time: 15, unit: 'MINUTES', activity: true) {
+//                                             sh("""
+//                                                 npx cucumber-js project_Web/features/${params.COMPONENT_NAME}.feature --exit --format json:reports/cucumberReport/web_report.json
+//                                             """)
+//                                         }
+//                                     }
+//                                 }
+//                             }
+//                         }
+
+//                         stage("Generate Report") {
+//                             steps {
+//                                 container('ubuntu') {
+//                                     catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+//                                         timeout(time: 15, unit: 'MINUTES', activity: true) {
+//                                             script{
+//                                                 sh("""
+//                                                     # Generate report
+//                                                     npm run generate-report
+//                                                     node support/multipleReporter.js
+//                                                     cd /home/jenkins/agent/workspace/autotesting/${JOB_BASE_NAME}/reports
+//                                                     rm -f Report*.zip
+//                                                     # ls -lR
+//                                                     tar -cf Report_${JOB_BASE_NAME}-${params.COMPONENT_NAME}#${BUILD_NUMBER}.tgz cucumberReport/*
+//                                                     ls -l
+//                                                 """)
+//                                             }
+//                                         }
+//                                     }
+//                                 }
+//                             }
+//                         }
+
+//                         stage('Parse Report') {
+//                             steps {
+//                                 container('ubuntu') {
+//                                         catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+//                                             timeout(time: 15, unit: 'MINUTES', activity: true) {
+//                                                 script {
+//                                                     // Read the webreport.json file content
+//                                                     def webReportJson = readFile("/home/jenkins/agent/workspace/autotesting/${JOB_BASE_NAME}/reports/cucumberReport/web_report.json")
+                                            
+//                                                     // Parse the JSON content using JsonSlurper
+//                                                     def jsonSlurper = new groovy.json.JsonSlurper()
+//                                                     def webReport = jsonSlurper.parseText(webReportJson)
+
+//                                                     // Initialize counters for test outcomes
+//                                                     int passedCount = 0
+//                                                     int failedCount = 0
+//                                                     int skippedCount = 0
+
+//                                                     // Convert LazyMap to HashMap for serialization
+//                                                     def webReportSerializable = webReport.collect { feature ->
+//                                                         [
+//                                                             name    : feature.name,
+//                                                             elements: feature.elements.collect { scenario ->
+//                                                                 [
+//                                                                     name: scenario.name,
+//                                                                     steps: scenario.steps.collect { step ->
+//                                                                         [
+//                                                                             name        : step.name,
+//                                                                             result      : [
+//                                                                                 status       : step.result.status,
+//                                                                                 error_message: step.result.error_message
+//                                                                             ]
+//                                                                         ]
+//                                                                     }
+//                                                                 ]
+//                                                             }
+//                                                         ]
+//                                                     }
+
+//                                                     // Iterate over each feature in the serializable JSON structure
+//                                                     webReportSerializable.each { feature ->
+//                                                         echo "Feature: ${feature.name}"
+
+//                                                         feature.elements.each { scenario ->
+//                                                             echo "Scenario: ${scenario.name}"
+                                                
+//                                                             // Iterate over each step in the scenario
+//                                                             scenario.steps.each { step ->
+//                                                                 def stepName = step.name
+//                                                                 def stepStatus = step.result.status
+//                                                                 def statusMessage = stepStatus == 'passed' ? 'PASS' : stepStatus == 'failed' ? 'FAIL' : 'SKIP'
+
+//                                                                 // Print step status
+//                                                                 echo "Step: ${stepName} - Status: ${statusMessage}"
+
+//                                                                 // Update counters based on step status
+//                                                                 if (stepStatus == 'passed') {
+//                                                                     passedCount++
+//                                                                 } else if (stepStatus == 'failed') {
+//                                                                     failedCount++
+//                                                                 } else if (stepStatus == 'skipped') {
+//                                                                     skippedCount++
+//                                                                 }
+//                                                             }
+//                                                         }
+//                                                     }
+
+//                                                     // Print the summary
+//                                                     echo "Total Passed: ${passedCount}"
+//                                                     echo "Total Failed: ${failedCount}"
+//                                                     echo "Total Skipped: ${skippedCount}"
+
+//                                                     // Send email with the summary
+//                                                     // emailext (
+//                                                     //     subject: "Test Results: ${JOB_BASE_NAME} #${BUILD_NUMBER}",
+//                                                     //     body: """
+//                                                     //         <p>Test execution summary:</p>
+//                                                     //         <ul>
+//                                                     //             <li>Total Passed: ${passedCount}</li>
+//                                                     //             <li>Total Failed: ${failedCount}</li>
+//                                                     //             <li>Total Skipped: ${skippedCount}</li>
+//                                                     //         </ul>
+//                                                     //     """,
+//                                                     //     //recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+//                                                     //     to: 'smaruthaiy@la-z-boy.com',
+//                                                     //     attachmentsPattern: '**/Report*.tgz',  // If you need to attach files
+//                                                     //     mimeType: 'text/html'
+//                                                     // )
+//                                                 }
+//                                             }
+//                                         }
+//                                 }
+//                             }
+//                         }
+
+//             }
+
+//              post {
+//                     always {
+//                             println "Finished "
+//                             script {
+//                                  emailext (
+//                                                         subject: "Test Results: ${JOB_BASE_NAME} #${BUILD_NUMBER}",
+//                                                         body: """
+//                                                             <p>Test execution summary:</p>
+//                                                             <ul>
+//                                                                 <li>Total Passed: ${passedCount}</li>
+//                                                                 <li>Total Failed: ${failedCount}</li>
+//                                                                 <li>Total Skipped: ${skippedCount}</li>
+//                                                             </ul>
+//                                                         """,
+//                                                         //recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+//                                                         to: 'smaruthaiy@la-z-boy.com',
+//                                                         attachmentsPattern: '**/Report*.tgz',  // If you need to attach files
+//                                                         mimeType: 'text/html'
+//                                                     )
+//                             }
+//                     }
+
+//              }
+// }
+
+
+// def report() {
+
+//         def webReportJson = readFile("/home/jenkins/agent/workspace/autotesting/${JOB_BASE_NAME}/reports/cucumberReport/web_report.json")
+//         // Parse the JSON content using JsonSlurper
+//         def jsonSlurper = new groovy.json.JsonSlurper()
+//         def webReport = jsonSlurper.parseText(webReportJson)
+
+//         // Initialize counters to avoid null errors
+//         int passedCount = 0
+//         int failedCount = 0
+//         int skippedCount = 0
+
+
+//         echo "Iterate over each feature in the serializable JSON structure"
+//         // Iterate over each feature in the JSON structure
+//         webReport.each { feature ->
+//             def featureName = feature?.name ?: "Unknown Feature"
+//             echo "Feature: ${featureName}"
+
+//             feature?.elements?.each { scenario ->
+//                 def scenarioName = scenario?.name ?: "Unknown Scenario"
+//                 echo "Scenario: ${scenarioName}"
+
+//                 scenario?.steps?.each { step ->
+//                     def stepName = step?.name ?: "Unknown Step"
+//                     def stepStatus = step?.result?.status?.toUpperCase() ?: "UNKNOWN"
+//                     def errorMessage = step?.result?.error_message ?: "No error message provided" // Attempt to get the error message
+                    
+//                     // Check if the step name contains "Before" or "After" and skip those steps
+//                     if (!stepName.contains("Before") && !stepName.contains("After") && !stepName.contains("Unknown")) {
+//                         echo "Step: ${stepName} - Status: ${stepStatus}"
+                        
+//                         if (stepStatus == 'PASSED') {
+//                             passedCount++
+//                         } else if (stepStatus == 'FAILED') {
+//                             failedCount++
+//                             echo "Error: Step '${stepName}' failed in scenario '${scenarioName}' in feature '${featureName}'"
+//                             echo "Failure Details: ${errorMessage}" // Print the specific error message
+//                         } else if (stepStatus == 'SKIPPED') {
+//                             skippedCount++
+//                         }
+//                     } else {
+//                         echo "Ignoring Step: ${stepName} as it is a Before/After step"
+//                     }
+//                 }
+//             }
+//         }
+        
+//         echo "Total Failed: ${failedCount}"
+//         echo "Total Skipped: ${skippedCount}"
+
+//         //   Send email with the summary
+//         // emailext (
+//         //     attachLog: true,
+//         //     subject: "[${currentBuild.result}] ${JOB_BASE_NAME}-${params.COMPONENT_NAME}-Build #${BUILD_NUMBER}",
+//         //     body: """
+//         //         <p>Test execution summary:</p>
+//         //         <ul>
+//         //             <li>Total Passed: ${passedCount}</li>
+//         //             <li>Total Failed: ${failedCount}</li>
+//         //             <li>Total Skipped: ${skippedCount}</li>
+//         //         </ul>
+//         //     """,
+//         //     to: 'smaruthaiy@la-z-boy.com',
+//         //     attachmentsPattern: '**/Report*.tgz',  // If you need to attach files
+//         //     mimeType: 'text/html'
+//         // )
+// }

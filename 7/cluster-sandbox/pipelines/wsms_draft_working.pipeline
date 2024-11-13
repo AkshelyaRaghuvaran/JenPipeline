@@ -1,0 +1,327 @@
+def sendEmail(){
+
+    def durationInMinutes = currentBuild.duration ? (currentBuild.duration / 1000 / 60) as Integer : 0
+    def lastCommitUser = "NOT APPLICABLE"
+    def lastCommitTime = "NOT APPLICABLE"
+    def lastCommitMessage = "No changes detected since the last successful build."
+    def lastCommitID = "No changes detected since the last successful build."
+    def triggeredByUser = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')[0]?.userId ?: 'System'
+  
+    echo "Triggered by: ${triggeredByUser}"
+
+    if (currentBuild.changeSets) {
+        currentBuild.changeSets.each { changeLogSet ->
+            changeLogSet.each { entry ->
+                lastCommitID = entry.commitId ?: "Unknown"
+                lastCommitMessage = entry.msg ?: "No message"
+                lastCommitUser = entry.author?.fullName ?: "Unknown"
+                
+                def commitDateTime = new Date(entry.timestamp)
+                def dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+                lastCommitTime = dateFormat.format(commitDateTime)
+            }
+        }
+    }
+
+    if (currentBuild.changeSets) {
+        currentBuild.changeSets.each { changeLogSet ->
+            changeLogSet.each { entry ->
+                lastCommitID = entry.commitId ?: "Unknown"
+                lastCommitMessage = entry.msg ?: "No message"
+                lastCommitUser = entry.author?.fullName ?: "Unknown"
+                
+                def commitDateTime = new Date(entry.timestamp)
+                def dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+                lastCommitTime = dateFormat.format(commitDateTime)
+            }
+        }
+    }
+    
+    emailext (
+        attachLog: true,
+        subject: "[${currentBuild.result}] ${JOB_BASE_NAME}-${params.COMPONENT_NAME}-Build #${BUILD_NUMBER}",
+        
+        body: """
+                <html>
+                <head>
+                    <style>
+                        body {
+                            font-family: Arial, sans-serif;
+                            color: #333;
+                            background-color: #f4f4f9;
+                            margin: 0;
+                            padding: 20px;
+                        }
+                        .container {
+                            max-width: 600px;
+                            margin: auto;
+                            background-color: #ffffff;
+                            padding: 20px;
+                            border-radius: 5px;
+                            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+                        }
+                        h2 {
+                            color: #0073e6;
+                        }
+                        h3 {
+                            color: #333;
+                        }
+                        p {
+                            line-height: 1.6;
+                        }
+                        ul {
+                            padding: 0;
+                            list-style-type: none;
+                        }
+                        li {
+                            margin-bottom: 5px;
+                        }
+                        .footer {
+                            margin-top: 20px;
+                            font-size: 12px;
+                            color: #666;
+                            border-top: 1px solid #ccc;
+                            padding-top: 10px;
+                        }
+                        .button {
+                            display: inline-block;
+                            padding: 10px 20px;
+                            color: #ffffff;
+                            background-color: #0073e6;
+                            text-decoration: none;
+                            border-radius: 3px;
+                            margin-top: 10px;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h2>Build Report for ${JOB_BASE_NAME}-${params.COMPONENT_NAME}-Build#${BUILD_NUMBER}</h2>
+                        
+                        <p><strong>Build URL:</strong> <a href="${BUILD_URL}">${BUILD_URL}</a></p>
+
+						<h3>Report Summary</h3>
+                        <p>
+							Please refer the attached <style="color: #0073e6;">Report_${params.COMPONENT_NAME}-Build#${BUILD_NUMBER}.tgz for test execution status dashboard.
+							Refer the build.log for detailed Jenkins build execution log.
+						</p>
+
+
+                    <body style="font-family: Arial, sans-serif; color: #333;">
+                        <h2 style="color: #0073e6;">Build Report for ${JOB_BASE_NAME} - Build #${BUILD_NUMBER}</h2>
+                        <p><strong>Build URL:</strong> <a href="${BUILD_URL}">${BUILD_URL}</a></p>
+
+
+                        <h3>Build Summary</h3>
+                        <ul>		
+                            <li><strong>Status:</strong> ${currentBuild.result}</li>
+                            <li><strong>Build Number:</strong> ${BUILD_NUMBER}</li>
+                            <li><strong>Component Name:</strong> ${params.COMPONENT_NAME}</li>
+                            <li><strong>Duration:</strong> ${durationInMinutes} minutes</li>
+                            <li><strong>Triggered By:</strong> ${triggeredByUser}</li>
+                        </ul>
+
+                        <h3>Latest Code Change Summary</h3>
+                        <ul>		
+                            <li><strong>Commit ID:</strong> ${lastCommitID}</li>
+                            <li><strong>Commit Message:</strong> ${lastCommitMessage}</li>
+                            <li><strong>Commit User:</strong> ${lastCommitUser}</li>
+                            <li><strong>Commit Date & Time:</strong> ${lastCommitTime}</li>
+                        </ul>
+
+                        <h3>Console Output</h3>
+                        <p>For detailed logs, please check the <a href="${BUILD_URL}console">console output</a>.</p>
+
+                        <a href="${BUILD_URL}console" class="button">View Console Output</a>
+
+                        <div class="footer">
+                            <p>Sent by Jenkins on <a href="${BUILD_URL}">${BUILD_URL}</a></p>
+                        </div>
+                    </div>
+                </body>
+                </html>
+    
+            """,
+        to: 'smaruthaiy@la-z-boy.com',
+        attachmentsPattern: '**/Report*.tgz',  // If you need to attach files
+        mimeType: 'text/html'
+    )
+}
+
+pipeline {
+        triggers {
+                parameterizedCron("""TZ=America/Detroit
+                """)
+        }	
+        agent {
+		kubernetes {
+			inheritFrom 'default'
+			yaml '''
+spec:
+  priorityClassName: priorityclassdefault
+  imagePullSecrets:
+  - name: harbor-pull-cred
+  containers:
+  - name: ubuntu
+    image: ubuntu:latest
+    tty: true
+    command: ["/bin/sh"]
+    args: ["-c", "sleep 2h"]
+    securityContext:
+      privileged: true
+                        '''
+                        retries 2
+		}
+	}
+	options {
+		disableConcurrentBuilds()
+                timeout(time: 2, unit: 'HOURS')
+                timestamps()
+	}
+
+	parameters {
+        // Define a choice parameter for selecting the environment
+        choice(
+            name: 'COMPONENT_NAME',
+            choices: ['Import','ProductRegistration', 'SupportRequest'],
+            description: 'Select the component for test execution'		
+        )
+    }
+	
+	stages {
+		stage("Install Dependencies") {
+			steps {
+				container('ubuntu') {
+					catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+						timeout(time: 15, unit: 'MINUTES', activity: true) {
+							sh("""
+								apt-get update 
+								apt-get install npm nodejs openjdk-21-jdk-headless -y 
+
+								# Install Playwright Dependencies
+								 npm install
+								 npm install @cucumber/cucumber
+								 npx playwright install
+								 npx playwright install-deps
+								 rm -rf node_modules/multiple-cucumber-html-reporter/examples/cypress
+							""")
+						}
+					}
+				}
+			}
+		}
+
+        stage("Execute Test Run") {
+			steps {
+				container('ubuntu') {
+					catchError(buildResult: 'UNSTABLE') {
+						timeout(time: 15, unit: 'MINUTES', activity: true) {
+                            sh("""
+								  npx cucumber-js project_Web/features/${params.COMPONENT_NAME}.feature --exit --format json:reports/cucumberReport/web_report.json
+							""")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage("Generate Report") {
+			steps {
+				container('ubuntu') {
+					catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+						timeout(time: 15, unit: 'MINUTES', activity: true) {
+                            script{
+                                sh("""
+                                    # Generate report
+                                    npm run generate-report
+                                    node support/multipleReporter.js
+                                    cd /home/jenkins/agent/workspace/autotesting/${JOB_BASE_NAME}/reports
+                                    rm -f Report*.zip
+                                    # ls -lR
+                                    tar -cf Report_${JOB_BASE_NAME}-${params.COMPONENT_NAME}#${BUILD_NUMBER}.tgz cucumberReport/*
+                                    ls -l
+                                """)
+                            }
+                        }
+                    }
+	            }
+            }
+        }
+
+        stage('Parse Report') {
+            steps {
+                container('ubuntu') {
+					catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+						timeout(time: 15, unit: 'MINUTES', activity: true) {
+                            script {
+                                // Read the webreport.json file content
+                                def webReportJson = readFile("/home/jenkins/agent/workspace/autotesting/${JOB_BASE_NAME}/reports/cucumberReport/web_report.json")
+                    
+                                // Parse the JSON content using JsonSlurper
+                                def jsonSlurper = new groovy.json.JsonSlurper()
+                                def webReport = jsonSlurper.parseText(webReportJson)
+
+                                // Convert LazyMap to HashMap for serialization
+                                def webReportSerializable = webReport.collect { feature ->
+                                    [
+                                        name    : feature.name,
+                                        elements: feature.elements.collect { scenario ->
+                                            [
+                                                name: scenario.name,
+                                                steps: scenario.steps.collect { step ->
+                                                    [
+                                                        name        : step.name,
+                                                        result      : [
+                                                            status       : step.result.status,
+                                                            error_message: step.result.error_message
+                                                        ]
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+
+                                // Iterate over each feature in the serializable JSON structure
+                                webReportSerializable.each { feature ->
+                                    echo "Feature: ${feature.name}"
+
+                                    feature.elements.each { scenario ->
+                                            echo "Scenario: ${scenario.name}"
+                            
+                                        // Iterate over each step in the scenario
+                                        scenario.steps.each { step ->
+                                                def stepName = step.name
+                                                def stepStatus = step.result.status
+                                                def statusMessage = stepStatus == 'passed' ? 'PASS' : 'FAIL'
+
+                                                // Print step status
+                                                echo "Step: ${stepName} - Status: ${statusMessage}"
+
+                                            // If the step failed, print error message if present
+                                            if (stepStatus == 'failed' && step.result.error_message) {
+                                                echo "Error: ${step.result.error_message}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+        post {
+            always {
+                    println "Finished - ${currentBuild.result}!"
+                    script {
+                        echo "Emailext Method calling..."
+                        sendEmail()
+                    }
+            }
+
+        }
+}
+

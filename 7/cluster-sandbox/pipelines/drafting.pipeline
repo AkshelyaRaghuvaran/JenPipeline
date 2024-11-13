@@ -1,0 +1,444 @@
+pipeline {
+    triggers {
+        parameterizedCron("""TZ=America/Detroit""")
+    }
+    agent {
+        kubernetes {
+            inheritFrom 'default'
+            yaml '''
+spec:
+  priorityClassName: priorityclassdefault
+  imagePullSecrets:
+  - name: harbor-pull-cred
+  containers:
+  - name: ubuntu
+    image: ubuntu:latest
+    tty: true
+    command: ["/bin/sh"]
+    args: ["-c", "sleep 2h"]
+    securityContext:
+      privileged: true
+            '''
+        }
+    }
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 2, unit: 'HOURS')
+        timestamps()
+    }
+
+    environment {
+        RECIPIENTS = 'smaruthaiy@la-z-boy.com'
+    }
+    
+     parameters {
+        // Define a choice parameter for selecting the environment
+        choice(
+            name: 'COMPONENT_NAME',
+            choices: ['Import','ProductRegistration', 'SupportRequest'],
+            description: 'Select the component for test execution'		
+        )
+    }
+	
+	stages {
+            stage("Print Initial Values") {
+                steps {
+                    script {
+                        echo "Jenkins Environment Variables:"
+                        echo "JOB_BASE_NAME: ${env.JOB_BASE_NAME}"
+                        echo "BUILD_NUMBER: ${env.BUILD_NUMBER}"
+                        echo "BUILD_URL: ${env.BUILD_URL}"
+                        echo "COMPONENT_NAME: ${params.COMPONENT_NAME}"
+                    }
+                }
+            }
+
+            stage("Install Dependencies") {
+                steps {
+                    container('ubuntu') {
+                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                            timeout(time: 15, unit: 'MINUTES', activity: true) {
+                                sh("""
+                                    apt-get update 
+                                    apt-get install npm nodejs openjdk-21-jdk-headless -y 
+
+                                    # Install Playwright Dependencies
+                                    npm install
+                                    npm install @cucumber/cucumber
+                                    npx playwright install
+                                    npx playwright install-deps
+                                    rm -rf node_modules/multiple-cucumber-html-reporter/examples/cypress
+                                """)
+                            }
+                        }
+                    }
+                }
+            }
+
+            stage("Execute Test Run") {
+                steps {
+                    container('ubuntu') {
+                        catchError(buildResult: 'SUCCESS') {
+                            timeout(time: 15, unit: 'MINUTES', activity: true) {
+                                sh("""
+                                    npx cucumber-js project_Web/features/${params.COMPONENT_NAME}.feature --exit --format json:reports/cucumberReport/web_report.json
+                                """)
+                            }
+                        }
+                    }
+                }
+            }
+
+            stage("Generate Report") {
+                steps {
+                    container('ubuntu') {
+                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                            timeout(time: 15, unit: 'MINUTES', activity: true) {
+                                script{
+                                    sh("""
+                                        # Generate report
+                                        npm run generate-report
+                                        node support/multipleReporter.js
+                                        cd /home/jenkins/agent/workspace/autotesting/${JOB_BASE_NAME}/reports
+                                        rm -f Report*.zip
+                                        # ls -lR
+                                        tar -cf Report_${JOB_BASE_NAME}-${params.COMPONENT_NAME}#${BUILD_NUMBER}.tgz cucumberReport/*
+                                        ls -l
+                                    """)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+    }
+         
+    post {
+        always {
+            script {
+                def buildStatus = currentBuild.result ?: 'SUCCESS'
+                sendCustomEmail(buildStatus, env.JOB_NAME, env.BUILD_NUMBER, env.BUILD_URL, env.RECIPIENTS,params.COMPONENT_NAME)
+            }
+        }
+    }
+}
+
+
+
+
+def sendCustomEmail(buildStatus, jobName, buildNumber, buildUrl, recipients,componentName) {
+    def subject = ""
+    def body = ""
+    def durationInMinutes = currentBuild.duration ? (currentBuild.duration / 1000 / 60) as Integer : 0
+    def lastCommitUser = "NOT APPLICABLE"
+    def lastCommitTime = "NOT APPLICABLE"
+    def lastCommitMessage = "No changes detected since the last successful build."
+    def lastCommitID = "No changes detected since the last successful build."
+    def triggeredByUser = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')[0]?.userId ?: 'System'
+
+    echo "Triggered by: ${triggeredByUser}"
+
+    // Collect change log details
+    if (currentBuild.changeSets) {
+        currentBuild.changeSets.each { changeLogSet ->
+            changeLogSet.each { entry ->
+                lastCommitID = entry.commitId ?: "Unknown"
+                lastCommitMessage = entry.msg ?: "No message"
+                lastCommitUser = entry.author?.fullName ?: "Unknown"
+                
+                def commitDateTime = new Date(entry.timestamp)
+                def dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+                lastCommitTime = dateFormat.format(commitDateTime)
+                echo "Commit ID: ${lastCommitID}, Message: ${lastCommitMessage}, User: ${lastCommitUser}"
+            }
+        }
+    }
+
+    // Parse JSON report
+    def webReportJson = readFile("/home/jenkins/agent/workspace/autotesting/${jobBaseName}/reports/cucumberReport/web_report.json")
+    def jsonSlurper = new groovy.json.JsonSlurper()
+    def webReport = jsonSlurper.parseText(webReportJson)
+
+    int passedCount = 0
+    int failedCount = 0
+    int skippedCount = 0
+
+    webReport.each { feature ->
+        feature?.elements?.each { scenario ->
+            scenario?.steps?.each { step ->
+                def stepName = step?.name ?: "Unknown Step"
+                def stepStatus = step?.result?.status?.toUpperCase() ?: "UNKNOWN"
+                def errorMessage = step?.result?.error_message ?: "No error message provided"
+
+                if (!stepName.contains("Before") && !stepName.contains("After") && !stepName.contains("Unknown")) {
+                    echo "Step: ${stepName} - Status: ${stepStatus}"
+
+                    if (stepStatus == 'PASSED') {
+                        passedCount++
+                    } else if (stepStatus == 'FAILED') {
+                        failedCount++
+                        echo "Error: Step '${stepName}' failed in scenario '${scenario?.name}' in feature '${feature?.name}'"
+                        echo "Failure Details: ${errorMessage}"
+                    } else if (stepStatus == 'SKIPPED') {
+                        skippedCount++
+                    }
+                }
+            }
+        }
+    }
+
+    echo "Total Passed: ${passedCount}"
+    echo "Total Failed: ${failedCount}"
+    echo "Total Skipped: ${skippedCount}"
+
+  
+
+    if (buildStatus == 'SUCCESS') {
+        subject = "[${buildResult}] ${jobBaseName}-${componentName}-Build #${buildNumber}"
+        body = """
+            <html>
+            <head>
+                <style>
+                    body { font-family: Arial, sans-serif; color: #333; background-color: #f4f4f9; }
+                    .container { max-width: 600px; margin: auto; background-color: #ffffff; padding: 20px; }
+                    h2 { color: #0073e6; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h2>Build Report for ${jobBaseName}-${componentName}-Build#${buildNumber}</h2>
+                    <ul>
+                        <li><strong>Status:</strong> ${buildResult}</li>
+                        <li><strong>Build Number:</strong> ${buildNumber}</li>
+                        <li><strong>Component Name:</strong> ${componentName}</li>
+                        <li><strong>Duration:</strong> ${durationInMinutes} minutes</li>
+                        <li><strong>Triggered By:</strong> ${triggeredByUser}</li>
+                    </ul>
+
+                    <h3>Latest Code Change</h3>
+                    <ul>
+                        <li><strong>Commit ID:</strong> ${lastCommitID}</li>
+                        <li><strong>Commit Message:</strong> ${lastCommitMessage}</li>
+                        <li><strong>Commit User:</strong> ${lastCommitUser}</li>
+                        <li><strong>Commit Time:</strong> ${lastCommitTime}</li>
+                    </ul>
+
+                    <a href="${buildUrl}" class="button">View Build Details</a>
+                </div>
+            </body>
+            </html>
+        """
+    } else if (buildStatus == 'FAILURE') {
+        subject = "[FAILURE] ${jobName} - Build #${buildNumber} Failed"
+        body = """
+            <html>
+            <head>
+                <style>
+                    body { font-family: Arial, sans-serif; color: #333; background-color: #f4f4f9; }
+                    .container { max-width: 600px; margin: auto; background-color: #ffffff; padding: 20px; }
+                    h2 { color: #0073e6; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h2>Build Report for ${jobBaseName}-${componentName}-Build#${buildNumber}</h2>
+                    <ul>
+                        <li><strong>Status:</strong> ${buildResult}</li>
+                        <li><strong>Build Number:</strong> ${buildNumber}</li>
+                        <li><strong>Component Name:</strong> ${componentName}</li>
+                        <li><strong>Duration:</strong> ${durationInMinutes} minutes</li>
+                        <li><strong>Triggered By:</strong> ${triggeredByUser}</li>
+                    </ul>
+
+                    <h3>Latest Code Change</h3>
+                    <ul>
+                        <li><strong>Commit ID:</strong> ${lastCommitID}</li>
+                        <li><strong>Commit Message:</strong> ${lastCommitMessage}</li>
+                        <li><strong>Commit User:</strong> ${lastCommitUser}</li>
+                        <li><strong>Commit Time:</strong> ${lastCommitTime}</li>
+                    </ul>
+
+                    <a href="${buildUrl}" class="button">View Build Details</a>
+                </div>
+            </body>
+            </html>
+        """
+    } else if (buildStatus == 'UNSTABLE') {
+        subject = "[UNSTABLE] ${jobName} - Build #${buildNumber} is Unstable"
+        body = """
+            <html>
+            <head>
+                <style>
+                    body { font-family: Arial, sans-serif; color: #333; background-color: #f4f4f9; }
+                    .container { max-width: 600px; margin: auto; background-color: #ffffff; padding: 20px; }
+                    h2 { color: #0073e6; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h2>Build Report for ${jobBaseName}-${componentName}-Build#${buildNumber}</h2>
+                    <ul>
+                        <li><strong>Status:</strong> ${buildResult}</li>
+                        <li><strong>Build Number:</strong> ${buildNumber}</li>
+                        <li><strong>Component Name:</strong> ${componentName}</li>
+                        <li><strong>Duration:</strong> ${durationInMinutes} minutes</li>
+                        <li><strong>Triggered By:</strong> ${triggeredByUser}</li>
+                    </ul>
+
+                    <h3>Latest Code Change</h3>
+                    <ul>
+                        <li><strong>Commit ID:</strong> ${lastCommitID}</li>
+                        <li><strong>Commit Message:</strong> ${lastCommitMessage}</li>
+                        <li><strong>Commit User:</strong> ${lastCommitUser}</li>
+                        <li><strong>Commit Time:</strong> ${lastCommitTime}</li>
+                    </ul>
+
+                    <a href="${buildUrl}" class="button">View Build Details</a>
+                </div>
+            </body>
+            </html>
+        """
+    } else {
+        subject = "[${buildResult}] ${jobBaseName}-${componentName}-Build #${buildNumber}"
+        body = """
+            <html>
+            <body>
+                <h2>Build Notification</h2>
+                <p>Status: <b>${buildStatus}</b></p>
+                <p>Build Number: <b>${buildNumber}</b></p>
+                <p>View build details: <a href="${buildUrl}">${buildUrl}</a></p>
+            </body>
+            </html>
+        """
+    }
+
+    emailext(
+        subject: subject,
+        body: body,
+        to: recipients,
+        attachmentsPattern: '**/Report*.tgz',  // If you need to attach files
+        mimeType: 'text/html'
+    )
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // Function to Send Email
+// def sendCustomEmail123(buildStatus, jobName, buildNumber, buildUrl, recipients,componentName) {
+//     def subject = ""
+//     def body = ""
+//     def durationInMinutes = currentBuild.duration ? (currentBuild.duration / 1000 / 60) as Integer : 0
+//     def lastCommitUser = "NOT APPLICABLE"
+//     def lastCommitTime = "NOT APPLICABLE"
+//     def lastCommitMessage = "No changes detected since the last successful build."
+//     def lastCommitID = "No changes detected since the last successful build."
+//     def triggeredByUser = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')[0]?.userId ?: 'System'
+
+//     echo "Triggered by: ${triggeredByUser}"
+
+//     // Collect change log details
+//     if (currentBuild.changeSets) {
+//         currentBuild.changeSets.each { changeLogSet ->
+//             changeLogSet.each { entry ->
+//                 lastCommitID = entry.commitId ?: "Unknown"
+//                 lastCommitMessage = entry.msg ?: "No message"
+//                 lastCommitUser = entry.author?.fullName ?: "Unknown"
+                
+//                 def commitDateTime = new Date(entry.timestamp)
+//                 def dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+//                 lastCommitTime = dateFormat.format(commitDateTime)
+//                 echo "Commit ID: ${lastCommitID}, Message: ${lastCommitMessage}, User: ${lastCommitUser}"
+//             }
+//         }
+//     }
+
+//     // Parse JSON report
+//     def webReportJson = readFile("/home/jenkins/agent/workspace/autotesting/${jobBaseName}/reports/cucumberReport/web_report.json")
+//     def jsonSlurper = new groovy.json.JsonSlurper()
+//     def webReport = jsonSlurper.parseText(webReportJson)
+
+//     int passedCount = 0
+//     int failedCount = 0
+//     int skippedCount = 0
+
+//     webReport.each { feature ->
+//         feature?.elements?.each { scenario ->
+//             scenario?.steps?.each { step ->
+//                 def stepName = step?.name ?: "Unknown Step"
+//                 def stepStatus = step?.result?.status?.toUpperCase() ?: "UNKNOWN"
+//                 def errorMessage = step?.result?.error_message ?: "No error message provided"
+
+//                 if (!stepName.contains("Before") && !stepName.contains("After") && !stepName.contains("Unknown")) {
+//                     echo "Step: ${stepName} - Status: ${stepStatus}"
+
+//                     if (stepStatus == 'PASSED') {
+//                         passedCount++
+//                     } else if (stepStatus == 'FAILED') {
+//                         failedCount++
+//                         echo "Error: Step '${stepName}' failed in scenario '${scenario?.name}' in feature '${feature?.name}'"
+//                         echo "Failure Details: ${errorMessage}"
+//                     } else if (stepStatus == 'SKIPPED') {
+//                         skippedCount++
+//                     }
+//                 }
+//             }
+//         }
+//     }
+
+//     echo "Total Passed: ${passedCount}"
+//     echo "Total Failed: ${failedCount}"
+//     echo "Total Skipped: ${skippedCount}"
+
+//     // Send email
+//     emailext (
+//         attachLog: true,
+//         subject: "[${buildResult}] ${jobBaseName}-${componentName}-Build #${buildNumber}",
+//         body: """
+//             <html>
+//             <head>
+//                 <style>
+//                     body { font-family: Arial, sans-serif; color: #333; background-color: #f4f4f9; }
+//                     .container { max-width: 600px; margin: auto; background-color: #ffffff; padding: 20px; }
+//                     h2 { color: #0073e6; }
+//                 </style>
+//             </head>
+//             <body>
+//                 <div class="container">
+//                     <h2>Build Report for ${jobBaseName}-${componentName}-Build#${buildNumber}</h2>
+//                     <ul>
+//                         <li><strong>Status:</strong> ${buildResult}</li>
+//                         <li><strong>Build Number:</strong> ${buildNumber}</li>
+//                         <li><strong>Component Name:</strong> ${componentName}</li>
+//                         <li><strong>Duration:</strong> ${durationInMinutes} minutes</li>
+//                         <li><strong>Triggered By:</strong> ${triggeredByUser}</li>
+//                     </ul>
+
+//                     <h3>Latest Code Change</h3>
+//                     <ul>
+//                         <li><strong>Commit ID:</strong> ${lastCommitID}</li>
+//                         <li><strong>Commit Message:</strong> ${lastCommitMessage}</li>
+//                         <li><strong>Commit User:</strong> ${lastCommitUser}</li>
+//                         <li><strong>Commit Time:</strong> ${lastCommitTime}</li>
+//                     </ul>
+
+//                     <a href="${buildUrl}" class="button">View Build Details</a>
+//                 </div>
+//             </body>
+//             </html>
+//         """,
+//         to: recipients,
+//         attachmentsPattern: '**/Report*.tgz',
+//         mimeType: 'text/html'
+//     )
+// }
